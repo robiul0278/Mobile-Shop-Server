@@ -8,9 +8,11 @@ const port = process.env.PORT || 4000;
 
 // middleware
 app.use(cors({
-  origin: "http://localhost:5173",
-  optionsSuccessStatus: "200",
+  origin: [process.env.FRONTEND_URL, process.env.FRONTEND_LOCAL_URL],
+  optionsSuccessStatus: 200,
 }));
+
+
 app.use(express.json());
 
 // token verification
@@ -71,7 +73,14 @@ async function main() {
       next();
     };
 
-    // collection api 
+    // Get All User
+    app.get("/user", verifyJWT, async (req, res) => {
+      const user = await userCollection.find()
+        .toArray()
+      res.send(user)
+    })
+
+    // Insert Register User 
     app.post("/user", async (req, res) => {
       const user = req.body;
       const query = { email: user.email };
@@ -83,6 +92,7 @@ async function main() {
       res.send(result);
     })
 
+    // Get Single User 
     app.get("/user/:email", async (req, res) => {
       const query = { email: req.params.email };
       const user = await userCollection.findOne(query);
@@ -92,6 +102,51 @@ async function main() {
       res.send(user);
     })
 
+
+    // Delete User
+    app.delete("/user/:id", async (req, res) => {
+      const { id } = req.params;
+
+      const result = await userCollection.deleteOne({ _id: new ObjectId(id) });
+
+  res.send(result);
+    });
+
+    // Change Role By admin
+    // app.patch("/user/:id", verifyJWT, async (req, res) => {
+    //   const id= req.params;
+    //   const role= req.body;
+    //   const updatedUser = await userCollection.updateOne(
+    //     { _id: new ObjectId(id) },
+    //     { $set: role},
+    //   );
+    //   res.send(updatedUser);
+    // });
+
+    app.patch("/user/:id", verifyJWT, async (req, res) => {
+      try {
+        const id = req.params.id; // Extract the ID from params
+        const { role } = req.body; // Extract the role from the body
+    
+        // Validate the role
+        const validRoles = ["admin", "buyer", "seller"];
+        if (!validRoles.includes(role)) {
+          return res.status(400).send({ message: "Invalid role specified." });
+        }
+    
+        // Update the user's role
+        const updatedUser = await userCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { role } }
+        );
+        res.send(updatedUser);
+      } catch (error) {
+        console.error("Error updating role:", error);
+        res.status(500).send({ message: "An error occurred while updating the role." });
+      }
+     
+    });
+
     // add Product 
     app.post("/add-product", verifyJWT, verifySeller, async (req, res) => {
       const product = req.body;
@@ -99,6 +154,7 @@ async function main() {
       res.send(result);
     });
 
+    // Get All Product 
     app.get("/all-product", async (req, res) => {
       try {
         // Destructure query parameters
@@ -153,92 +209,82 @@ async function main() {
     });
 
 
-  //  My Products Edit and delete =========== 
+    //Get single Products 
+    app.get("/all-product/:id", async (req, res) => {
+      const id = req.params.id;
+      // console.log(id);
+      const query = { _id: new ObjectId(id) };
+      const data = await productCollection.findOne(query); // Single data
+      res.send(data);
+    });
 
-  app.get("/manage-products/:email", verifyJWT, async (req, res) => {
-    const email = req.params.email;
 
-    // console.log(email);
-  
-    try {
-      // Find the user based on the email
-      const user = await userCollection.findOne({ email });
-  
-      if (!user) {
-        return res.status(404).send({ message: "User not found!" });
+    //  My All Products  =========== 
+    app.get("/manage-products/:email", verifyJWT, async (req, res) => {
+      const email = req.params.email;
+      // console.log(email);
+      try {
+        // Find the user based on the email
+        const user = await userCollection.findOne({ email });
+
+        if (!user) {
+          return res.status(404).send({ message: "User not found!" });
+        }
+        // Find all products associated with this email
+        const products = await productCollection.find({ email }).toArray();
+        // console.log("products",products)
+        res.send(products);
+      } catch (error) {
+        console.error("Error fetching products:", error);
+        res.status(500).send({ message: "Server error occurred!" });
       }
-  
-      // Find all products associated with this email
-      const products = await productCollection.find({ email }).toArray();
-
-      // console.log("products",products)
-  
-      res.send(products);
-    } catch (error) {
-      console.error("Error fetching products:", error);
-      res.status(500).send({ message: "Server error occurred!" });
-    }
-  });
+    });
 
 
+    // Delete Seller Product 
+    app.delete("/delete-product/:productId", async (req, res) => {
+      const productId = req.params.productId;
 
-  app.delete("/delete-product/:productId", async (req, res) => {
-    const productId = req.params.productId;
-  
-    try {
-      // Convert productId to ObjectId (if you're using MongoDB's ObjectId)
-      const objectId = new ObjectId(productId);
-  
-      // Delete the product with the given productId
-      const result = await productCollection.deleteOne({ _id: objectId });
-  
-      if (result.deletedCount === 0) {
-        return res.status(404).send({ message: "Product not found!" });
+      try {
+        // Convert productId to ObjectId (if you're using MongoDB's ObjectId)
+        const objectId = new ObjectId(productId);
+
+        // Delete the product with the given productId
+        const result = await productCollection.deleteOne({ _id: objectId });
+
+        if (result.deletedCount === 0) {
+          return res.status(404).send({ message: "Product not found!" });
+        }
+        res.send({ message: "Product deleted successfully!" });
+      } catch (error) {
+        console.error("Error deleting product:", error);
+        res.status(500).send({ message: "Server error occurred!" });
       }
-  
-      res.send({ message: "Product deleted successfully!" });
-    } catch (error) {
-      console.error("Error deleting product:", error);
-      res.status(500).send({ message: "Server error occurred!" });
-    }
-  });
-  
+    });
 
-
-  app.put("/update-product/:productId", verifyJWT, async (req, res) => {
-    const { productId } = req.params;
-    const updatedData = req.body; // The data to update
-  
-    try {
-      // Convert the productId to ObjectId
-      const objectId = new ObjectId(productId);
-  
-      // Update the product in the database
-      const result = await productCollection.updateOne(
-        { _id: objectId }, // Match the document by ID
-        { $set: updatedData } // Update only the fields provided in updatedData
-      );
-  
-      if (result.matchedCount === 0) {
-        return res.status(404).send({ message: "Product not found!" });
+    // Update Product by Seller 
+    app.put("/update-product/:id", verifyJWT, async (req, res) => {
+      const id = req.params.id;  // You already have `id` from the route params
+      const productData = req.body; // The data to update
+      // console.log(id, productData);
+      try {
+        // Convert the product ID to ObjectId
+        const objectId = new ObjectId(id); // Use the `id` from the route
+        // Update the product in the database
+        const result = await productCollection.updateOne(
+          { _id: objectId }, // Match the document by ID
+          { $set: productData } // Update only the fields provided in productData
+        );
+        if (result.matchedCount === 0) {
+          return res.status(404).send({ message: "Product not found!" });
+        }
+        res.send({ message: "Product updated successfully!", result });
+      } catch (error) {
+        console.error("Error updating product:", error);
+        res.status(500).send({ message: "Server error occurred!" });
       }
-  
-      res.send({ message: "Product updated successfully!", result });
-    } catch (error) {
-      console.error("Error updating product:", error);
-      res.status(500).send({ message: "Server error occurred!" });
-    }
-  });
-  
+    });
 
-
-
-
-
-
-  
-
-    // Wishlist ========================== 
 
     // add to wishlist 
     app.patch("/add-wishlist", verifyJWT, async (req, res,) => {
@@ -254,9 +300,7 @@ async function main() {
     // remove to wishlist 
     app.patch("/remove-wishlist", async (req, res,) => {
       const { userEmail, productId } = req.body;
-
       // console.log("Remove", userEmail, productId);
-
       const result = await userCollection.updateOne(
         { email: userEmail },
         { $pull: { wishlist: new ObjectId(String(productId)) } }
@@ -265,29 +309,24 @@ async function main() {
     })
 
     // get wishlist data 
-    app.get("/wishlist/:userId", verifyJWT, async (req, res) =>{
+    app.get("/wishlist/:userId", verifyJWT, async (req, res) => {
       const userId = req.params.userId;
       // console.log(userId);
-
       const user = await userCollection.findOne(
         {
           _id: new ObjectId(userId),
         }
       )
-
       if (!user) {
         return res.send({ message: "User not Found!" })
       }
-
       const wishlist = await productCollection.find(
         {
           _id: { $in: user.wishlist || [] }
         }
       ).toArray();
-
       res.send(wishlist);
     })
-    // Cart ========================== 
 
     // add to cart 
     app.patch("/add-cart", verifyJWT, async (req, res,) => {
@@ -300,7 +339,7 @@ async function main() {
       res.send(result);
     });
 
-    // remove to wishlist 
+    // remove product to cart
     app.patch("/remove-cart", async (req, res,) => {
       const { userEmail, productId } = req.body;
 
@@ -312,20 +351,17 @@ async function main() {
     })
 
     // get data from cart 
-    app.get("/cart/:userId", verifyJWT, async (req, res) =>{
+    app.get("/cart/:userId", verifyJWT, async (req, res) => {
       const userId = req.params.userId;
       // console.log(userId);
-
       const user = await userCollection.findOne(
         {
           _id: new ObjectId(userId),
         }
       )
-
       if (!user) {
         return res.send({ message: "User not Found!" })
       }
-
       const cart = await productCollection.find(
         {
           _id: { $in: user.cart || [] }

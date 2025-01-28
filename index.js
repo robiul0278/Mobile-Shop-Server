@@ -6,14 +6,21 @@ require("dotenv").config();
 const app = express();
 const port = process.env.PORT || 4000;
 
+
+app.use(
+  cors({
+    origin: ['http://localhost:5173', 'http://localhost:5175'],
+  })
+);
+
 // middleware
 app.use(cors({
   origin: [process.env.FRONTEND_URL, process.env.FRONTEND_LOCAL_URL],
   optionsSuccessStatus: 200,
 }));
-
-
 app.use(express.json());
+
+
 
 // token verification
 const verifyJWT = (req, res, next) => {

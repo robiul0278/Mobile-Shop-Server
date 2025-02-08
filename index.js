@@ -4,7 +4,7 @@ const cors = require("cors");
 const jwt = require("jsonwebtoken");
 require("dotenv").config();
 const app = express();
-const port = process.env.PORT || 4000;
+const port = process.env.PORT || 5000;
 
 
 app.use(
@@ -79,6 +79,16 @@ async function main() {
       }
       next();
     };
+    // verify seller
+    const verifyAdmin = async (req, res, next) => {
+      const email = req.decoded.email;
+      const query = { email: email };
+      const user = await userCollection.findOne(query);
+      if (user?.role !== "admin") {
+        return res.send({ message: "Forbidden access" });
+      }
+      next();
+    };
 
     // Get All User
     app.get("/user", verifyJWT, async (req, res) => {
@@ -116,7 +126,7 @@ async function main() {
 
       const result = await userCollection.deleteOne({ _id: new ObjectId(id) });
 
-  res.send(result);
+      res.send(result);
     });
 
     // Change Role By admin
@@ -134,13 +144,13 @@ async function main() {
       try {
         const id = req.params.id; // Extract the ID from params
         const { role } = req.body; // Extract the role from the body
-    
+
         // Validate the role
         const validRoles = ["admin", "buyer", "seller"];
         if (!validRoles.includes(role)) {
           return res.status(400).send({ message: "Invalid role specified." });
         }
-    
+
         // Update the user's role
         const updatedUser = await userCollection.updateOne(
           { _id: new ObjectId(id) },
@@ -151,26 +161,37 @@ async function main() {
         console.error("Error updating role:", error);
         res.status(500).send({ message: "An error occurred while updating the role." });
       }
-     
+
     });
 
-    // add Product 
-    app.post("/add-product", verifyJWT, verifySeller, async (req, res) => {
-      const product = req.body;
-      const result = await productCollection.insertOne(product);
-      res.send(result);
-    });
+// Add Product
+app.post("/add-product", verifyJWT, verifyAdmin, async (req, res) => {
+  try {
+    const product = req.body;
+
+    const result = await productCollection.insertOne(product);
+
+    if (!result.acknowledged) {
+      throw new Error("Product insertion failed");
+    }
+    res.status(201).json({ message: "Product added successfully", result });
+  } catch (error) {
+    console.error("Error adding product:", error);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
 
     // Get All Product 
     app.get("/all-product", async (req, res) => {
       try {
         // Destructure query parameters
-        const { title, sort, category, brand, page = 1, limit = 9 } = req.query;
-
+        const {search, sort, category, brand, page = 1, limit = 9 } = req.query;
+      
         // Build the query object
         const query = {};
-        if (title) {
-          query.title = { $regex: title, $options: "i" }; // Case-insensitive regex
+        if (search) {
+          query.title = { $regex: search, $options: "i" }; // Case-insensitive regex
         }
         if (category) {
           query.category = { $regex: category, $options: "i" }; // Case-insensitive regex
@@ -178,7 +199,6 @@ async function main() {
         if (brand) {
           query.brand = brand;
         }
-
         // pagination
         const pageNumber = Number(page);
         const limitNumber = Number(limit);
@@ -196,11 +216,6 @@ async function main() {
 
         // Get the total count of matching products
         const totalProducts = await productCollection.countDocuments(query);
-
-        // Fetch all categories and brands for filtering options
-        // const productInfo = await productCollection
-        //   .find({}, { projection: { category: 1, brand: 1 } })
-        //   .toArray();
 
         // Deduplicate categories and brands
         const brands = [...new Set(products.map((product) => product.brand))];
@@ -297,11 +312,26 @@ async function main() {
     app.patch("/add-wishlist", verifyJWT, async (req, res,) => {
       const { userEmail, productId } = req.body;
 
-      const result = await userCollection.updateOne(
-        { email: userEmail },
-        { $addToSet: { wishlist: new ObjectId(String(productId)) } }
-      )
-      res.send(result);
+      try {
+        // step 1: check user
+        const user = await userCollection.findOne({ email: userEmail });
+        if (!user) {
+          return res.status(404).json({ success: false, message: "User Not Found!" });
+        }
+        // step 2: check duplicate data
+        if (user?.wishlist?.some(id => id.toString() === productId)) {
+          return res.status(409).json({ success: false, message: "Product already in wishlist!" })
+        }
+        // step 3: add to wishlist 
+        const result = await userCollection.updateOne(
+          { email: userEmail },
+          { $addToSet: { wishlist: new ObjectId(String(productId)) } }
+        )
+        res.status(200).json({ success: true, message: "Added to wishlist successfully" });
+      } catch (error) {
+        console.error("Error in /add-cart:", error);
+        res.status(500).json({ success: false, message: "Something went wrong!" });
+      }
     })
 
     // remove to wishlist 
@@ -316,17 +346,14 @@ async function main() {
     })
 
     // get wishlist data 
-    app.get("/wishlist/:userId", verifyJWT, async (req, res) => {
-      const userId = req.params.userId;
-      // console.log(userId);
-      const user = await userCollection.findOne(
-        {
-          _id: new ObjectId(userId),
-        }
-      )
+    app.get("/wishlist/:email", verifyJWT, async (req, res) => {
+      const email = req.params.email;
+
+      const user = await userCollection.findOne({ email });
       if (!user) {
-        return res.send({ message: "User not Found!" })
+        return res.status(404).json({ success: false, message: "User Not Found!" });
       }
+
       const wishlist = await productCollection.find(
         {
           _id: { $in: user.wishlist || [] }
@@ -336,15 +363,31 @@ async function main() {
     })
 
     // add to cart 
-    app.patch("/add-cart", verifyJWT, async (req, res,) => {
+    app.patch("/add-cart", verifyJWT, async (req, res) => {
       const { userEmail, productId } = req.body;
+      try {
+        // Step 1: check user
+        const user = await userCollection.findOne({ email: userEmail });
+        if (!user) {
+          return res.status(404).json({ success: false, message: "User not found!" });
+        }
+        // Check if product is already in cart
+        if (user?.cart?.some(id => id.toString() === productId)) {
+          return res.status(409).json({ success: false, message: "Product already in cart!" });
+        }
+        // Step 3: 
+        const result = await userCollection.updateOne(
+          { email: userEmail },
+          { $addToSet: { cart: new ObjectId(productId) } }
+        );
+        res.status(200).json({ success: true, message: "Added to cart successfully!" });
 
-      const result = await userCollection.updateOne(
-        { email: userEmail },
-        { $addToSet: { cart: new ObjectId(String(productId)) } }
-      )
-      res.send(result);
+      } catch (error) {
+        console.error("Error in /add-cart:", error);
+        res.status(500).json({ success: false, message: "Something went wrong!" });
+      }
     });
+
 
     // remove product to cart
     app.patch("/remove-cart", async (req, res,) => {
@@ -358,16 +401,13 @@ async function main() {
     })
 
     // get data from cart 
-    app.get("/cart/:userId", verifyJWT, async (req, res) => {
-      const userId = req.params.userId;
-      // console.log(userId);
-      const user = await userCollection.findOne(
-        {
-          _id: new ObjectId(userId),
-        }
-      )
+    app.get("/cart/:email", verifyJWT, async (req, res) => {
+      const email = req.params.email;
+      // console.log(email);
+      const user = await userCollection.findOne({email})
+
       if (!user) {
-        return res.send({ message: "User not Found!" })
+        return res.status(404).json({ message: "User not Found!" })
       }
       const cart = await productCollection.find(
         {

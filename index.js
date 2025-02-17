@@ -61,6 +61,8 @@ async function main() {
     // Define a database and collection
     const userCollection = client.db("gadgetShop").collection("users");
     const productCollection = client.db("gadgetShop").collection("products");
+    const purchaseCollection = client.db("gadgetShop").collection("order");
+    const flashSaleCollection = client.db("gadgetShop").collection("flash-sale");
 
     // jsonwebtoken
     app.post("/jsonwebtoken", async (req, res) => {
@@ -69,16 +71,7 @@ async function main() {
       res.send({ token });
     });
 
-    // verify seller
-    const verifySeller = async (req, res, next) => {
-      const email = req.decoded.email;
-      const query = { email: email };
-      const user = await userCollection.findOne(query);
-      if (user?.role !== "seller") {
-        return res.send({ message: "Forbidden access" });
-      }
-      next();
-    };
+
     // verify seller
     const verifyAdmin = async (req, res, next) => {
       const email = req.decoded.email;
@@ -99,18 +92,26 @@ async function main() {
 
     // Insert Register User 
     app.post("/user", async (req, res) => {
-      const user = req.body;
-      const query = { email: user.email };
-      const existingUser = await userCollection.findOne(query);
-      if (existingUser) {
-        return res.send({ message: "User already exist!" });
+      try {
+        const user = req.body;
+        const query = { email: user.email };
+        const existingUser = await userCollection.findOne(query);
+
+        if (existingUser) {
+          return res.status(409).json({ message: "User already exists!" });
+        }
+
+        const result = await userCollection.insertOne(user);
+        res.status(201).json("Login successful!", result); // 201 Created
+      } catch (error) {
+        console.error("Error inserting user:", error);
+        res.status(500).json({ message: "Internal Server Error" });
       }
-      const result = await userCollection.insertOne(user);
-      res.send(result);
-    })
+    });
+
 
     // Get Single User 
-    app.get("/user/:email", async (req, res) => {
+    app.get("/user/:email", verifyJWT, async (req, res) => {
       const query = { email: req.params.email };
       const user = await userCollection.findOne(query);
       if (!user) {
@@ -145,8 +146,9 @@ async function main() {
         const id = req.params.id; // Extract the ID from params
         const { role } = req.body; // Extract the role from the body
 
+        // console.log(req.body);
         // Validate the role
-        const validRoles = ["admin", "buyer", "seller"];
+        const validRoles = ["admin", "user"];
         if (!validRoles.includes(role)) {
           return res.status(400).send({ message: "Invalid role specified." });
         }
@@ -164,37 +166,254 @@ async function main() {
 
     });
 
-// Add Product
-app.post("/add-product", verifyJWT, verifyAdmin, async (req, res) => {
-  try {
-    const product = req.body;
+    // Create Flash Sale **************************************************
+    app.post("/flash-sale", verifyJWT, verifyAdmin, async (req, res) => {
+      try {
+        const product = req.body;
+        const existName = product.name
 
-    const result = await productCollection.insertOne(product);
+        const existingFlashSale = await flashSaleCollection.findOne({ name: existName });
 
-    if (!result.acknowledged) {
-      throw new Error("Product insertion failed");
-    }
-    res.status(201).json({ message: "Product added successfully", result });
-  } catch (error) {
-    console.error("Error adding product:", error);
-    res.status(500).json({ error: "Internal Server Error" });
-  }
-});
+        if (existingFlashSale) {
+          return res.status(400).json({ message: "Flash Sale already exists, please update!" });
+        }
+
+        const result = await flashSaleCollection.insertOne(product);
+
+        if (!result.acknowledged) {
+          return res.status(500).json({ message: "Failed to create flash sale" });
+        }
+
+        res.status(201).json({ message: "Flash sale created successfully" });
+      } catch (error) {
+        console.error("Error creating flash sale:", error);
+        res.status(500).json({ message: "Internal Server Error" });
+      }
+    });
+
+    // Update Flash Sale **************************************************
+    app.patch("/flash-sale/:id", verifyJWT, verifyAdmin, async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { discount, endTime, startTime } = req.body;
+
+        const existingFlashSale = await flashSaleCollection.findOne({ _id: new ObjectId(id) });
+
+        if (!existingFlashSale) {
+          return res.status(400).json({ message: "Please Create Flash Sale!" });
+        }
+
+        const result = await flashSaleCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { discount, endTime, startTime } }
+        );
+
+        if (result.modifiedCount === 0) {
+          return res.status(400).json({ message: "No changes made to the flash sale" });
+        }
+
+
+        res.status(200).json({ message: "Flash sale Update successfully" });
+      } catch (error) {
+        console.error("Error updating flash sale:", error);
+        res.status(500).json({ message: "Internal Server Error" });
+      }
+    });
+
+
+    // Get Flash Sale **************************************************
+    app.get("/flash-sale", async (req, res) => {
+      try {
+        const now = new Date();
+        const { search, page = 1, limit = 100  } = req.query;
+
+        // Convert pagination values to numbers
+        const pageNumber = Number(page);
+        const limitNumber = Number(limit);
+
+        // Find an active flash sale
+        const flashSale = await flashSaleCollection.findOne({
+          startTime: { $lte: now.toISOString() }, // Convert `now` to an ISO string
+          endTime: { $gte: now.toISOString() }   // Compare with ISO string
+        });
+
+        if (!flashSale) {
+          // No active flash sale, return response with _id from the most recent flash sale (if any)
+          const lastFlashSale = await flashSaleCollection.find().toArray();
+          // console.log(lastFlashSale[0]._id);
+          if (lastFlashSale.length > 0) {
+            return res.status(200).json({
+              message: "Update Flash Sale Time",
+              _id: lastFlashSale[0]._id, // Get the _id of the most recent flash sale
+            });
+          } else {
+            // No flash sale found in the collection at all
+            return res.status(200).json({
+              message: "Please Create a Flash Sale!!",
+              _id: null,
+              products: []
+            });
+          }
+        }
+
+
+        // Convert product IDs to ObjectId safely
+        const productIds = flashSale.products
+          .map(id => {
+            try {
+              return new ObjectId(id);
+            } catch (error) {
+              console.error(`Invalid product ID: ${id}`, error);
+              return null;
+            }
+          })
+          .filter(Boolean); // Remove invalid IDs
+
+        if (productIds.length === 0) {
+          return res.status(200).json({
+            message: "No valid products found in this flash sale!",
+            _id: flashSale._id,
+            products: []
+          });
+        }
+
+        // Build the query for discounted products only
+        const query = { _id: { $in: productIds } };
+        if (search) {
+          query.name = { $regex: search, $options: "i" }; // Case-insensitive search
+        }
+
+        // Fetch all products from the database
+        const allProducts = await productCollection.find(query).toArray();
+
+
+        // Filter out only the discounted products
+        const discountedProducts = allProducts
+          .map(product => ({
+            ...product,
+            originalPrice: product.price,
+            price: product.price - (product.price * flashSale.discount / 100),
+          }))
+          .filter(product => product.price < product.originalPrice); // Ensure only discounted products are included
+
+        // Apply pagination after filtering discounted products
+        const paginatedProducts = discountedProducts.slice((pageNumber - 1) * limitNumber, pageNumber * limitNumber);
+
+        if (paginatedProducts.length === 0) {
+          return res.status(200).json({
+            message: "No discounted products found for this flash sale!",
+            _id: flashSale._id,
+            products: []
+          });
+        }
+
+        const allProduct = allProducts.length 
+        const totalProducts = discountedProducts.length;
+        const totalPages = Math.ceil(totalProducts / limitNumber);
+        
+        res.status(200).json({
+          message: "Flash sale products retrieved successfully!",
+          products: paginatedProducts,
+          totalProducts: allProduct,
+          pagination: {
+            totalProducts,
+            totalPages,
+          },
+          discount: flashSale.discount,
+          endTime: flashSale.endTime,
+          _id: flashSale._id,
+        });
+        
+
+      } catch (error) {
+        console.error("Error fetching flash sale:", error);
+        res.status(500).json({ message: "Internal Server Error" });
+      }
+    });
+
+
+
+    // Add Product ******************************************************
+    app.post("/add-product", verifyJWT, verifyAdmin, async (req, res) => {
+      try {
+        const product = req.body;
+
+        const result = await productCollection.insertOne(product);
+
+        if (!result.acknowledged) {
+          throw new Error("Product insertion failed");
+        }
+        res.status(201).json({ message: "Product added successfully" });
+      } catch (error) {
+        console.error("Error adding product:", error);
+        res.status(500).json({ error: "Internal Server Error" });
+      }
+    });
+
+    // Create Flash Sale 
+    app.post("/flash-sale", verifyJWT, verifyAdmin, async (req, res) => {
+      try {
+        const product = req.body;
+        const result = await flashSaleCollection.insertOne(product)
+        if (!result.acknowledged) {
+          throw new Error("Product insertion failed");
+        }
+        res.status(201).json({ message: "Flash product added successfully" });
+      } catch (error) {
+        console.error("Error adding product:", error);
+        res.status(500).json({ error: "Internal Server Error" });
+      }
+    })
+
+
+    // add product to Flash SAle 
+    app.patch("/add-flash-sale", async (req, res,) => {
+      const { productId, userRole } = req.body;
+
+      try {
+        // step 1: check user
+        const flashSale = await flashSaleCollection.findOne({ role: userRole });
+        if (!flashSale) {
+          return res.status(404).json({ success: false, message: "Flash Sale Not Found!" });
+        }
+        console.log(flashSale);
+        // step 2: check duplicate data
+        if (flashSale?.products?.some(id => id.toString() === productId)) {
+          return res.status(409).json({ success: false, message: "Product already in flash sale!" })
+        }
+        // step 3: add to wishlist 
+        const result = await flashSaleCollection.updateOne(
+          { role: userRole },
+          { $addToSet: { products: new ObjectId(String(productId)) } }
+        )
+        res.status(200).json({ success: true, message: "Added to flash sale successfully" });
+      } catch (error) {
+        console.error("Error in /add-cart:", error);
+        res.status(500).json({ success: false, message: "Something went wrong!" });
+      }
+    })
+
 
 
     // Get All Product 
     app.get("/all-product", async (req, res) => {
       try {
         // Destructure query parameters
-        const {search, sort, category, brand, page = 1, limit = 9 } = req.query;
-      
+        const { search, sort, category, sub_category, brand, page = 1, limit = 9 } = req.query;
+
         // Build the query object
         const query = {};
         if (search) {
-          query.title = { $regex: search, $options: "i" }; // Case-insensitive regex
+          query.name = { $regex: search, $options: "i" }; // Case-insensitive regex
+        }
+        if (sub_category) {
+          query.sub_category = { $regex: category, $options: "i" }; // Case-insensitive regex
         }
         if (category) {
           query.category = { $regex: category, $options: "i" }; // Case-insensitive regex
+        }
+        if (sub_category) {
+          query.sub_category = { $regex: sub_category, $options: "i" }; // Case-insensitive regex
         }
         if (brand) {
           query.brand = brand;
@@ -219,7 +438,7 @@ app.post("/add-product", verifyJWT, verifyAdmin, async (req, res) => {
 
         // Deduplicate categories and brands
         const brands = [...new Set(products.map((product) => product.brand))];
-        const categories = [...new Set(products.map((product) => product.category))];
+        const categories = [...new Set(products.map((product) => product.sub_category))];
 
         // Send the response
         res.json({ products, brands, categories, totalProducts });
@@ -230,6 +449,36 @@ app.post("/add-product", verifyJWT, verifyAdmin, async (req, res) => {
       }
     });
 
+
+    // remove from flash sale 
+    app.patch("/remove-flash-sale-product", verifyJWT, async (req, res) => {
+      try {
+        const { flashSaleId, productId } = req.body;
+
+        if (!flashSaleId || !productId) {
+          return res.status(400).json({ error: "flashSaleId and productId are required" });
+        }
+
+        const result = await flashSaleCollection.updateOne(
+          { _id: new ObjectId(flashSaleId) },
+          { $pull: { products: new ObjectId(productId) } }
+        );
+
+        if (result.modifiedCount === 0) {
+          return res.status(404).json({ error: "Product not found in flash sale" });
+        }
+
+        return res.status(200).json({
+          success: true,
+          message: "Product removed from flash sale",
+          result,
+        });
+
+      } catch (error) {
+        console.error("Error removing product from flash sale:", error);
+        res.status(500).json({ error: "Internal Server Error", details: error.message });
+      }
+    });
 
     //Get single Products 
     app.get("/all-product/:id", async (req, res) => {
@@ -242,31 +491,33 @@ app.post("/add-product", verifyJWT, verifyAdmin, async (req, res) => {
 
 
     //  My All Products  =========== 
-    app.get("/manage-products/:email", verifyJWT, async (req, res) => {
-      const email = req.params.email;
-      // console.log(email);
-      try {
-        // Find the user based on the email
-        const user = await userCollection.findOne({ email });
+    // app.get("/manage-products/:email", verifyJWT, async (req, res) => {
+    //   const email = req.params.email;
+    //   // console.log(email);
+    //   try {
+    //     // Find the user based on the email
+    //     const user = await userCollection.findOne({ email });
 
-        if (!user) {
-          return res.status(404).send({ message: "User not found!" });
-        }
-        // Find all products associated with this email
-        const products = await productCollection.find({ email }).toArray();
-        // console.log("products",products)
-        res.send(products);
-      } catch (error) {
-        console.error("Error fetching products:", error);
-        res.status(500).send({ message: "Server error occurred!" });
-      }
-    });
+    //     if (!user) {
+    //       return res.status(404).send({ message: "User not found!" });
+    //     }
+    //     // Find all products associated with this email
+    //     const products = await productCollection.find({ email }).toArray();
+    //     // console.log("products",products)
+    //     res.send(products);
+    //   } catch (error) {
+    //     console.error("Error fetching products:", error);
+    //     res.status(500).send({ message: "Server error occurred!" });
+    //   }
+    // });
 
 
-    // Delete Seller Product 
+
+
+
+    // Delete Product 
     app.delete("/delete-product/:productId", async (req, res) => {
       const productId = req.params.productId;
-
       try {
         // Convert productId to ObjectId (if you're using MongoDB's ObjectId)
         const objectId = new ObjectId(productId);
@@ -284,7 +535,7 @@ app.post("/add-product", verifyJWT, verifyAdmin, async (req, res) => {
       }
     });
 
-    // Update Product by Seller 
+    // Update Product
     app.put("/update-product/:id", verifyJWT, async (req, res) => {
       const id = req.params.id;  // You already have `id` from the route params
       const productData = req.body; // The data to update
@@ -307,116 +558,69 @@ app.post("/add-product", verifyJWT, verifyAdmin, async (req, res) => {
       }
     });
 
-
-    // add to wishlist 
-    app.patch("/add-wishlist", verifyJWT, async (req, res,) => {
-      const { userEmail, productId } = req.body;
-
+    // Buy Products *****************************************************
+    // Make Order
+    app.post("/purchase", verifyJWT, async (req, res) => {
       try {
-        // step 1: check user
-        const user = await userCollection.findOne({ email: userEmail });
-        if (!user) {
-          return res.status(404).json({ success: false, message: "User Not Found!" });
+        const order = req.body;
+
+        const result = await purchaseCollection.insertOne(order);
+
+        if (!result.acknowledged) {
+          throw new Error("Product insertion failed");
         }
-        // step 2: check duplicate data
-        if (user?.wishlist?.some(id => id.toString() === productId)) {
-          return res.status(409).json({ success: false, message: "Product already in wishlist!" })
-        }
-        // step 3: add to wishlist 
-        const result = await userCollection.updateOne(
-          { email: userEmail },
-          { $addToSet: { wishlist: new ObjectId(String(productId)) } }
-        )
-        res.status(200).json({ success: true, message: "Added to wishlist successfully" });
+        res.status(201).json({ message: "Product purchase successfully", result });
       } catch (error) {
-        console.error("Error in /add-cart:", error);
-        res.status(500).json({ success: false, message: "Something went wrong!" });
-      }
-    })
-
-    // remove to wishlist 
-    app.patch("/remove-wishlist", async (req, res,) => {
-      const { userEmail, productId } = req.body;
-      // console.log("Remove", userEmail, productId);
-      const result = await userCollection.updateOne(
-        { email: userEmail },
-        { $pull: { wishlist: new ObjectId(String(productId)) } }
-      )
-      res.send(result);
-    })
-
-    // get wishlist data 
-    app.get("/wishlist/:email", verifyJWT, async (req, res) => {
-      const email = req.params.email;
-
-      const user = await userCollection.findOne({ email });
-      if (!user) {
-        return res.status(404).json({ success: false, message: "User Not Found!" });
-      }
-
-      const wishlist = await productCollection.find(
-        {
-          _id: { $in: user.wishlist || [] }
-        }
-      ).toArray();
-      res.send(wishlist);
-    })
-
-    // add to cart 
-    app.patch("/add-cart", verifyJWT, async (req, res) => {
-      const { userEmail, productId } = req.body;
-      try {
-        // Step 1: check user
-        const user = await userCollection.findOne({ email: userEmail });
-        if (!user) {
-          return res.status(404).json({ success: false, message: "User not found!" });
-        }
-        // Check if product is already in cart
-        if (user?.cart?.some(id => id.toString() === productId)) {
-          return res.status(409).json({ success: false, message: "Product already in cart!" });
-        }
-        // Step 3: 
-        const result = await userCollection.updateOne(
-          { email: userEmail },
-          { $addToSet: { cart: new ObjectId(productId) } }
-        );
-        res.status(200).json({ success: true, message: "Added to cart successfully!" });
-
-      } catch (error) {
-        console.error("Error in /add-cart:", error);
-        res.status(500).json({ success: false, message: "Something went wrong!" });
+        console.error("Error purchase product:", error);
+        res.status(500).json({ error: "Internal Server Error" });
       }
     });
 
 
-    // remove product to cart
-    app.patch("/remove-cart", async (req, res,) => {
-      const { userEmail, productId } = req.body;
+    //  Get my Order  =========== 
+    app.get("/my-order/:id", verifyJWT, async (req, res) => {
+      const userId = req.params.id;
 
-      const result = await userCollection.updateOne(
-        { email: userEmail },
-        { $pull: { cart: new ObjectId(String(productId)) } }
-      )
-      res.send(result);
-    })
+      // Convert the product ID to ObjectId
+      const objectId = new ObjectId(userId);
 
-    // get data from cart 
-    app.get("/cart/:email", verifyJWT, async (req, res) => {
-      const email = req.params.email;
-      // console.log(email);
-      const user = await userCollection.findOne({email})
+      try {
+        const user = await userCollection.findOne({ _id: objectId });
 
-      if (!user) {
-        return res.status(404).json({ message: "User not Found!" })
-      }
-      const cart = await productCollection.find(
-        {
-          _id: { $in: user.cart || [] }
+        if (!user) {
+          return res.status(404).send({ message: "User not found!" });
         }
-      ).toArray();
+        // Find all products associated with this email
+        const products = await purchaseCollection.find({ userId }).toArray();
+        // console.log("products",products)
+        res.send(products);
+      } catch (error) {
+        console.error("Error fetching products:", error);
+        res.status(500).send({ message: "Server error occurred!" });
+      }
+    });
 
-      res.send(cart);
-    })
+    // // get wishlist data 
+    // app.get("/wishlist/:email", verifyJWT, async (req, res) => {
+    //   const email = req.params.email;
+
+    //   const user = await userCollection.findOne({ email });
+    //   if (!user) {
+    //     return res.status(404).json({ success: false, message: "User Not Found!" });
+    //   }
+
+    //   const wishlist = await productCollection.find(
+    //     {
+    //       _id: { $in: user.wishlist || [] }
+    //     }
+    //   ).toArray();
+    //   res.send(wishlist);
+    // })
+
+
+
+
+
 
 
     //Server api
